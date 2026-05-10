@@ -97,53 +97,52 @@ jobs:
             git diff -- cursor/agent.json
           fi
 
-      - name: Write workflow summary
-        run: |
-          set -euo pipefail
-
-          {
-            echo "## Cursor update"
-            echo
-            echo "- **Commit message:** \`${{ steps.cursor.outputs.commit_message }}\`"
-            echo "- **Base:** \`${UPSTREAM_REPOSITORY}@${BASE_BRANCH}\`"
-            echo "- **Previous build:** \`${{ steps.cursor.outputs.before_build || 'unknown' }}\`"
-            echo "- **Resolved build:** \`${{ steps.cursor.outputs.build }}\`"
-            echo "- **Version field:** \`${{ steps.cursor.outputs.version }}\`"
-            echo "- **Changed:** \`${{ steps.cursor.outputs.changed }}\`"
-            echo
-          } >> "${GITHUB_STEP_SUMMARY}"
-
-          if [ "${{ steps.cursor.outputs.changed }}" = "true" ]; then
-            {
-              echo "### Diff"
-              echo
-              echo '```diff'
-              git diff -- cursor/agent.json
-              echo '```'
-            } >> "${GITHUB_STEP_SUMMARY}"
-          else
-            echo "No update is available." >> "${GITHUB_STEP_SUMMARY}"
-          fi
-
       - name: Create pull request to upstream
+        id: create_pr
         if: steps.cursor.outputs.changed == 'true' && steps.cursor.outputs.dry_run != 'true'
         uses: peter-evans/create-pull-request@v8.1.1
         with:
           token: ${{ secrets.PR_TOKEN }}
           push-to-fork: ${{ env.FORK_REPOSITORY }}
           base: ${{ env.BASE_BRANCH }}
-          committer: "${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>"
           commit-message: "${{ steps.cursor.outputs.commit_message }}"
           title: "${{ steps.cursor.outputs.commit_message }}"
           body: |
             Automated update using the build pinned by [cursor.com/install](${{ env.CURSOR_INSTALL_URL }}).
 
             - **Previous build:** `${{ steps.cursor.outputs.before_build }}`
-            - **`version`:** `${{ steps.cursor.outputs.version }}`
+            - **version:** `${{ steps.cursor.outputs.version }}`
             - **Build:** `${{ steps.cursor.outputs.build }}`
-
-            **Upstream:** [${{ env.UPSTREAM_REPOSITORY }}](https://github.com/${{ env.UPSTREAM_REPOSITORY }}) @ `${{ env.BASE_BRANCH }}`
 
             **Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           branch: cursor-${{ steps.cursor.outputs.build }}
           delete-branch: true
+
+      - name: Write workflow summary
+        run: |
+          set -euo pipefail
+
+          pr_url="${{ steps.create_pr.outputs['pull-request-url'] }}"
+          pr_num="${{ steps.create_pr.outputs['pull-request-number'] }}"
+          if [ -n "${pr_url}" ] && [ -n "${pr_num}" ]; then
+            echo "## Cursor update [#${pr_num}](${pr_url})" >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "## Cursor update" >> "${GITHUB_STEP_SUMMARY}"
+          fi
+          echo >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${{ steps.cursor.outputs.changed }}" = "true" ]; then
+            {
+              echo "### Diff"
+              echo
+              echo '```diff'
+              if [ -n "${pr_url}" ]; then
+                git show -p --format= HEAD -- cursor/agent.json
+              else
+                git diff -- cursor/agent.json
+              fi
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "No update is available." >> "${GITHUB_STEP_SUMMARY}"
+          fi
