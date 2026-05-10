@@ -1,0 +1,149 @@
+name: Update Cursor agent
+
+on:
+  schedule:
+    - cron: "0 13 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Resolve and preview the Cursor update without opening a PR"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: update-cursor-agent-upstream
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  BASE_BRANCH: main
+  CURSOR_INSTALL_URL: https://cursor.com/install
+  FORK_REPOSITORY: iamanaws/registry
+  UPSTREAM_REPOSITORY: agentclientprotocol/registry
+
+jobs:
+  update:
+    if: github.repository == 'iamanaws/registry'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout upstream base
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.UPSTREAM_REPOSITORY }}
+          ref: ${{ env.BASE_BRANCH }}
+          persist-credentials: false
+
+      - name: Sync fork base
+        if: inputs.dry_run != true
+        env:
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git push "https://x-access-token:${PR_TOKEN}@github.com/${FORK_REPOSITORY}.git" "HEAD:${BASE_BRANCH}"
+
+      - name: Update cursor/agent.json
+        id: cursor
+        env:
+          DRY_RUN: ${{ inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+
+          before_build="$(sed -nE 's|.*downloads\.cursor\.com/lab/([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-f0-9]+)/.*|\1|p' cursor/agent.json | head -n1)"
+          build="$(
+            curl -fsSL "${CURSOR_INSTALL_URL}" |
+              sed -nE '/^DOWNLOAD_URL=/s|^DOWNLOAD_URL="https://downloads\.cursor\.com/lab/([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-f0-9]+)/.*|\1|p'
+          )"
+          if [ -z "${build}" ]; then
+            echo "::error::Could not parse DOWNLOAD_URL from https://cursor.com/install"
+            exit 1
+          fi
+
+          version="${build%%-*}"
+          before_version="${before_build%%-*}"
+
+          if [ -n "${before_build}" ] && [ "${before_version}" = "${version}" ]; then
+            commit_message="cursor: ${before_build} -> ${build}"
+          elif [ -n "${before_version}" ]; then
+            commit_message="cursor: ${before_version} -> ${version}"
+          else
+            commit_message="cursor: ${version}"
+          fi
+
+          printf '%s\n' \
+            "before_build=${before_build}" \
+            "version=${version}" \
+            "build=${build}" \
+            "commit_message=${commit_message}" \
+            "dry_run=${DRY_RUN}" \
+            >> "${GITHUB_OUTPUT}"
+          echo "Resolved Cursor build ${build} (version field ${version})"
+
+          VERSION="${version}" BUILD="${build}" perl -0pi -e '
+            s/"version": "[^"]+"/"version": "$ENV{VERSION}"/;
+            s|lab/[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-f0-9]+/|lab/$ENV{BUILD}/|g;
+          ' cursor/agent.json
+          jq -e . cursor/agent.json >/dev/null
+
+          if git diff --quiet -- cursor/agent.json; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+            echo "Cursor agent is already current."
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+            echo "Cursor agent build changed from ${before_build:-unknown} to ${build}."
+            git diff -- cursor/agent.json
+          fi
+
+      - name: Write workflow summary
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## Cursor update"
+            echo
+            echo "- **Commit message:** \`${{ steps.cursor.outputs.commit_message }}\`"
+            echo "- **Base:** \`${UPSTREAM_REPOSITORY}@${BASE_BRANCH}\`"
+            echo "- **Previous build:** \`${{ steps.cursor.outputs.before_build || 'unknown' }}\`"
+            echo "- **Resolved build:** \`${{ steps.cursor.outputs.build }}\`"
+            echo "- **Version field:** \`${{ steps.cursor.outputs.version }}\`"
+            echo "- **Changed:** \`${{ steps.cursor.outputs.changed }}\`"
+            echo
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${{ steps.cursor.outputs.changed }}" = "true" ]; then
+            {
+              echo "### Diff"
+              echo
+              echo '```diff'
+              git diff -- cursor/agent.json
+              echo '```'
+            } >> "${GITHUB_STEP_SUMMARY}"
+          else
+            echo "No update is available." >> "${GITHUB_STEP_SUMMARY}"
+          fi
+
+      - name: Create pull request to upstream
+        if: steps.cursor.outputs.changed == 'true' && steps.cursor.outputs.dry_run != 'true'
+        uses: peter-evans/create-pull-request@v8.1.1
+        with:
+          token: ${{ secrets.PR_TOKEN }}
+          push-to-fork: ${{ env.FORK_REPOSITORY }}
+          base: ${{ env.BASE_BRANCH }}
+          committer: "${{ github.actor }} <${{ github.actor_id }}+${{ github.actor }}@users.noreply.github.com>"
+          commit-message: "${{ steps.cursor.outputs.commit_message }}"
+          title: "${{ steps.cursor.outputs.commit_message }}"
+          body: |
+            Automated update using the build pinned by [cursor.com/install](${{ env.CURSOR_INSTALL_URL }}).
+
+            - **Previous build:** `${{ steps.cursor.outputs.before_build }}`
+            - **`version`:** `${{ steps.cursor.outputs.version }}`
+            - **Build:** `${{ steps.cursor.outputs.build }}`
+
+            **Upstream:** [${{ env.UPSTREAM_REPOSITORY }}](https://github.com/${{ env.UPSTREAM_REPOSITORY }}) @ `${{ env.BASE_BRANCH }}`
+
+            **Workflow run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          branch: cursor-${{ steps.cursor.outputs.build }}
+          delete-branch: true

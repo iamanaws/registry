@@ -1,0 +1,17 @@
+= Cursor Update Workflow Branch
+
+This branch only hosts the GitHub Actions workflow that updates the Cursor agent entry.
+
+The workflow:
+
+* checks out `agentclientprotocol/registry` from `main`
+* syncs `iamanaws/registry` `main` to that upstream `main`
+* resolves the latest Cursor lab build from `https://cursor.com/install`
+* updates `cursor/agent.json` on a dedicated `cursor-<build>` branch
+* opens a pull request back to upstream `main`
+
+Manual runs support `dry_run=true` to resolve the latest build and print the diff without pushing branches or opening a pull request.
+
+Required secret:
+
+* `PR_TOKEN`: fine-grained GitHub token scoped to `iamanaws/registry` with `Contents: Read and write` and `Pull requests: Read and write`.
