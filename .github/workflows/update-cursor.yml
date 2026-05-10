@@ -136,11 +136,7 @@ jobs:
               echo "### Diff"
               echo
               echo '```diff'
-              if [ -n "${pr_url}" ]; then
-                git show -p --format= HEAD -- cursor/agent.json
-              else
-                git diff -- cursor/agent.json
-              fi
+              git diff -- cursor/agent.json
               echo '```'
             } >> "${GITHUB_STEP_SUMMARY}"
           else
