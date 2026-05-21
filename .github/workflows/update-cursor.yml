@@ -97,9 +97,39 @@ jobs:
             git diff -- cursor/agent.json
           fi
 
+      - name: Check for existing Cursor PR
+        id: existing_pr
+        if: steps.cursor.outputs.changed == 'true' && steps.cursor.outputs.dry_run != 'true'
+        env:
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          existing_pr="$(
+            curl -fsSL \
+              -H "Authorization: Bearer ${PR_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${UPSTREAM_REPOSITORY}/pulls?state=open&base=${BASE_BRANCH}&per_page=100" |
+              jq -c --arg fork_repo "${FORK_REPOSITORY}" '
+                map(select(.head.repo.full_name == $fork_repo and (.head.ref | startswith("cursor-")))) |
+                first // empty
+              '
+          )"
+
+          if [ -n "${existing_pr}" ]; then
+            echo "skip_create_pr=true" >> "${GITHUB_OUTPUT}"
+            echo "pull_request_url=$(jq -r '.html_url' <<<"${existing_pr}")" >> "${GITHUB_OUTPUT}"
+            echo "pull_request_number=$(jq -r '.number' <<<"${existing_pr}")" >> "${GITHUB_OUTPUT}"
+            echo "head_ref=$(jq -r '.head.ref' <<<"${existing_pr}")" >> "${GITHUB_OUTPUT}"
+            echo "Found existing open Cursor PR; skipping PR creation."
+          else
+            echo "skip_create_pr=false" >> "${GITHUB_OUTPUT}"
+            echo "No existing open Cursor PR found."
+          fi
+
       - name: Create pull request to upstream
         id: create_pr
-        if: steps.cursor.outputs.changed == 'true' && steps.cursor.outputs.dry_run != 'true'
+        if: steps.cursor.outputs.changed == 'true' && steps.cursor.outputs.dry_run != 'true' && steps.existing_pr.outputs.skip_create_pr != 'true'
         uses: peter-evans/create-pull-request@v8.1.1
         with:
           token: ${{ secrets.PR_TOKEN }}
@@ -122,14 +152,19 @@ jobs:
         run: |
           set -euo pipefail
 
-          pr_url="${{ steps.create_pr.outputs['pull-request-url'] }}"
-          pr_num="${{ steps.create_pr.outputs['pull-request-number'] }}"
+          pr_url="${{ steps.create_pr.outputs['pull-request-url'] || steps.existing_pr.outputs.pull_request_url }}"
+          pr_num="${{ steps.create_pr.outputs['pull-request-number'] || steps.existing_pr.outputs.pull_request_number }}"
           if [ -n "${pr_url}" ] && [ -n "${pr_num}" ]; then
             echo "## Cursor update [#${pr_num}](${pr_url})" >> "${GITHUB_STEP_SUMMARY}"
           else
             echo "## Cursor update" >> "${GITHUB_STEP_SUMMARY}"
           fi
           echo >> "${GITHUB_STEP_SUMMARY}"
+
+          if [ "${{ steps.existing_pr.outputs.skip_create_pr }}" = "true" ]; then
+            echo "Reused existing open PR from branch \`${{ steps.existing_pr.outputs.head_ref }}\`." >> "${GITHUB_STEP_SUMMARY}"
+            echo >> "${GITHUB_STEP_SUMMARY}"
+          fi
 
           if [ "${{ steps.cursor.outputs.changed }}" = "true" ]; then
             {
