@@ -43,7 +43,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          git push "https://x-access-token:${PR_TOKEN}@github.com/${FORK_REPOSITORY}.git" "HEAD:${BASE_BRANCH}"
+          # Reset the fork base branch to the checked-out upstream base.
+          git push --force "https://x-access-token:${PR_TOKEN}@github.com/${FORK_REPOSITORY}.git" "HEAD:${BASE_BRANCH}"
 
       - name: Update cursor/agent.json
         id: cursor
