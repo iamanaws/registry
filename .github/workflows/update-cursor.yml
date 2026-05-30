@@ -106,6 +106,8 @@ jobs:
         id: existing_pr
         if: steps.cursor.outputs.changed == 'true' && steps.cursor.outputs.dry_run != 'true'
         env:
+          DESIRED_BUILD: ${{ steps.cursor.outputs.build }}
+          DESIRED_VERSION: ${{ steps.cursor.outputs.version }}
           PR_TOKEN: ${{ secrets.PR_TOKEN }}
         run: |
           set -euo pipefail
@@ -122,15 +124,100 @@ jobs:
           )"
 
           if [ -n "${existing_pr}" ]; then
+            pr_url="$(jq -r '.html_url' <<<"${existing_pr}")"
+            pr_number="$(jq -r '.number' <<<"${existing_pr}")"
+            head_ref="$(jq -r '.head.ref' <<<"${existing_pr}")"
+            encoded_head_ref="$(jq -rn --arg ref "${head_ref}" '$ref | @uri')"
+            existing_agent_json="$(mktemp)"
+            existing_build=""
+            existing_version=""
+
+            if curl -fsSL \
+              -H "Authorization: Bearer ${PR_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${FORK_REPOSITORY}/contents/cursor/agent.json?ref=${encoded_head_ref}" |
+              jq -r '.content' |
+              base64 -d > "${existing_agent_json}"; then
+              existing_version="$(jq -r '.version // empty' "${existing_agent_json}")"
+              existing_build="$(sed -nE 's|.*downloads\.cursor\.com/lab/([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-f0-9]+)/.*|\1|p' "${existing_agent_json}" | head -n1)"
+            else
+              echo "::warning::Could not read cursor/agent.json from existing PR branch ${head_ref}; falling back to the branch name."
+            fi
+
+            if [ -z "${existing_build}" ] && [[ "${head_ref}" == cursor-* ]]; then
+              existing_build="${head_ref#cursor-}"
+            fi
+            if [ -z "${existing_version}" ] && [ -n "${existing_build}" ]; then
+              existing_version="${existing_build%%-*}"
+            fi
+
             echo "skip_create_pr=true" >> "${GITHUB_OUTPUT}"
-            echo "pull_request_url=$(jq -r '.html_url' <<<"${existing_pr}")" >> "${GITHUB_OUTPUT}"
-            echo "pull_request_number=$(jq -r '.number' <<<"${existing_pr}")" >> "${GITHUB_OUTPUT}"
-            echo "head_ref=$(jq -r '.head.ref' <<<"${existing_pr}")" >> "${GITHUB_OUTPUT}"
-            echo "Found existing open Cursor PR; skipping PR creation."
+            echo "pull_request_url=${pr_url}" >> "${GITHUB_OUTPUT}"
+            echo "pull_request_number=${pr_number}" >> "${GITHUB_OUTPUT}"
+            echo "head_ref=${head_ref}" >> "${GITHUB_OUTPUT}"
+            echo "existing_build=${existing_build}" >> "${GITHUB_OUTPUT}"
+            echo "existing_version=${existing_version}" >> "${GITHUB_OUTPUT}"
+
+            if [ "${existing_build}" = "${DESIRED_BUILD}" ] && [ "${existing_version}" = "${DESIRED_VERSION}" ]; then
+              echo "update_existing_pr=false" >> "${GITHUB_OUTPUT}"
+              echo "Found existing open Cursor PR already targeting ${DESIRED_VERSION} (${DESIRED_BUILD})."
+            else
+              echo "update_existing_pr=true" >> "${GITHUB_OUTPUT}"
+              echo "Found existing open Cursor PR targeting ${existing_version:-unknown} (${existing_build:-unknown}); will update it to ${DESIRED_VERSION} (${DESIRED_BUILD})."
+            fi
           else
             echo "skip_create_pr=false" >> "${GITHUB_OUTPUT}"
+            echo "update_existing_pr=false" >> "${GITHUB_OUTPUT}"
             echo "No existing open Cursor PR found."
           fi
+
+      - name: Update existing Cursor PR
+        if: steps.cursor.outputs.changed == 'true' && steps.cursor.outputs.dry_run != 'true' && steps.existing_pr.outputs.update_existing_pr == 'true'
+        env:
+          BEFORE_BUILD: ${{ steps.cursor.outputs.before_build }}
+          BUILD: ${{ steps.cursor.outputs.build }}
+          COMMIT_MESSAGE: ${{ steps.cursor.outputs.commit_message }}
+          EXISTING_BUILD: ${{ steps.existing_pr.outputs.existing_build }}
+          EXISTING_VERSION: ${{ steps.existing_pr.outputs.existing_version }}
+          HEAD_REF: ${{ steps.existing_pr.outputs.head_ref }}
+          PR_NUMBER: ${{ steps.existing_pr.outputs.pull_request_number }}
+          PR_TOKEN: ${{ secrets.PR_TOKEN }}
+          VERSION: ${{ steps.cursor.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cursor/agent.json
+          git commit -m "${COMMIT_MESSAGE}"
+          git push --force "https://x-access-token:${PR_TOKEN}@github.com/${FORK_REPOSITORY}.git" "HEAD:${HEAD_REF}"
+
+          curl -fsSL \
+            -X PATCH \
+            -H "Authorization: Bearer ${PR_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${UPSTREAM_REPOSITORY}/pulls/${PR_NUMBER}" \
+            -d "$(jq -n --arg title "${COMMIT_MESSAGE}" '{title: $title}')"
+
+          comment_body="$(mktemp)"
+          cat > "${comment_body}" <<EOF
+          Updated this PR to the latest build pinned by [cursor.com/install](${CURSOR_INSTALL_URL}).
+
+          - **Previous upstream build:** \`${BEFORE_BUILD:-unknown}\`
+          - **Previous PR build:** \`${EXISTING_BUILD:-unknown}\`
+          - **Previous PR version:** \`${EXISTING_VERSION:-unknown}\`
+          - **version:** \`${VERSION}\`
+          - **Build:** \`${BUILD}\`
+
+          **Workflow run:** ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+
+          curl -fsSL \
+            -X POST \
+            -H "Authorization: Bearer ${PR_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${UPSTREAM_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            -d "$(jq -n --rawfile body "${comment_body}" '{body: $body}')"
 
       - name: Create pull request to upstream
         id: create_pr
@@ -166,8 +253,11 @@ jobs:
           fi
           echo >> "${GITHUB_STEP_SUMMARY}"
 
-          if [ "${{ steps.existing_pr.outputs.skip_create_pr }}" = "true" ]; then
-            echo "Reused existing open PR from branch \`${{ steps.existing_pr.outputs.head_ref }}\`." >> "${GITHUB_STEP_SUMMARY}"
+          if [ "${{ steps.existing_pr.outputs.skip_create_pr }}" = "true" ] && [ "${{ steps.existing_pr.outputs.update_existing_pr }}" = "true" ]; then
+            echo "Updated existing open PR branch \`${{ steps.existing_pr.outputs.head_ref }}\` from \`${{ steps.existing_pr.outputs.existing_build || 'unknown' }}\` to \`${{ steps.cursor.outputs.build }}\`." >> "${GITHUB_STEP_SUMMARY}"
+            echo >> "${GITHUB_STEP_SUMMARY}"
+          elif [ "${{ steps.existing_pr.outputs.skip_create_pr }}" = "true" ]; then
+            echo "Existing open PR branch \`${{ steps.existing_pr.outputs.head_ref }}\` already targets \`${{ steps.cursor.outputs.build }}\`." >> "${GITHUB_STEP_SUMMARY}"
             echo >> "${GITHUB_STEP_SUMMARY}"
           fi
 
