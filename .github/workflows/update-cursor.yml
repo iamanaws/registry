@@ -53,10 +53,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          before_build="$(sed -nE 's|.*downloads\.cursor\.com/lab/([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-f0-9]+)/.*|\1|p' cursor/agent.json | head -n1)"
+          before_build="$(sed -nE 's|.*downloads\.cursor\.com/lab/([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[^/]+)/.*|\1|p' cursor/agent.json | head -n1)"
           build="$(
             curl -fsSL "${CURSOR_INSTALL_URL}" |
-              sed -nE '/^DOWNLOAD_URL=/s|^DOWNLOAD_URL="https://downloads\.cursor\.com/lab/([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-f0-9]+)/.*|\1|p'
+              sed -nE '/^DOWNLOAD_URL=/s|^DOWNLOAD_URL="https://downloads\.cursor\.com/lab/([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[^/]+)/.*|\1|p'
           )"
           if [ -z "${build}" ]; then
             echo "::error::Could not parse DOWNLOAD_URL from https://cursor.com/install"
@@ -85,7 +85,7 @@ jobs:
 
           VERSION="${version}" BUILD="${build}" perl -0pi -e '
             s/"version": "[^"]+"/"version": "$ENV{VERSION}"/;
-            s|lab/[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-f0-9]+/|lab/$ENV{BUILD}/|g;
+            s|lab/[0-9]{4}\.[0-9]{2}\.[0-9]{2}-[^/]+/|lab/$ENV{BUILD}/|g;
           ' cursor/agent.json
           jq -e . cursor/agent.json >/dev/null
 
@@ -139,7 +139,7 @@ jobs:
               jq -r '.content' |
               base64 -d > "${existing_agent_json}"; then
               existing_version="$(jq -r '.version // empty' "${existing_agent_json}")"
-              existing_build="$(sed -nE 's|.*downloads\.cursor\.com/lab/([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[a-f0-9]+)/.*|\1|p' "${existing_agent_json}" | head -n1)"
+              existing_build="$(sed -nE 's|.*downloads\.cursor\.com/lab/([0-9]{4}\.[0-9]{2}\.[0-9]{2}-[^/]+)/.*|\1|p' "${existing_agent_json}" | head -n1)"
             else
               echo "::warning::Could not read cursor/agent.json from existing PR branch ${head_ref}; falling back to the branch name."
             fi
